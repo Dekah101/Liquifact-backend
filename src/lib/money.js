@@ -39,6 +39,24 @@ function parseAmount(input, { decimals = 7 } = {}) {
   return minor;
 }
 
+/**
+ * Converts a stored/legacy amount to minor units, allowing zero (for funded
+ * amounts). Bigints pass through; numbers and decimal strings go through
+ * parseAmount's validation.
+ *
+ * @param {bigint|number|string} value amount
+ * @returns {bigint} minor units
+ */
+function toMinorUnits(value) {
+  if (typeof value === 'bigint') {
+    return value;
+  }
+  if (value === 0 || (typeof value === 'string' && /^0+(?:\.0+)?$/.test(value))) {
+    return 0n;
+  }
+  return parseAmount(value);
+}
+
 function formatAmount(amountMinor, decimals = 7) {
   validateDecimals(decimals);
   if (typeof amountMinor !== 'bigint') {
@@ -91,6 +109,7 @@ module.exports = {
   MAX_INVOICE_AMOUNT,
   parseAmount,
   formatAmount,
+  toMinorUnits,
   toStroops: parseAmount,
   fromStroops: formatAmount,
   add,
