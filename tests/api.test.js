@@ -213,9 +213,9 @@ describe('invoices', () => {
   test('remainingCapacity is present in list and detail', async () => {
     const list = await request(app).get('/api/invoices');
     const inv = list.body.data.find((i) => i.id === 'INV_0002');
-    expect(inv.remainingCapacity).toBe(7000);
+    expect(inv.remainingCapacity).toBe('7000');
     const detail = await request(app).get('/api/invoices/INV_0002');
-    expect(detail.body.data.remainingCapacity).toBe(7000);
+    expect(detail.body.data.remainingCapacity).toBe('7000');
   });
 
   test('get by id', async () => {
@@ -238,7 +238,7 @@ describe('invoices', () => {
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
     expect(ok.status).toBe(201);
     expect(ok.body.data.status).toBe('open');
-    expect(ok.body.data.remainingCapacity).toBe(500);
+    expect(ok.body.data.remainingCapacity).toBe('500');
   });
 
   test('fund moves invoice to funded when target reached', async () => {
@@ -246,7 +246,7 @@ describe('invoices', () => {
     const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('funded');
-    expect(res.body.data.remainingCapacity).toBe(0);
+    expect(res.body.data.remainingCapacity).toBe('0');
     const again = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor });
     expect(again.status).toBe(409);
     expect(again.type).toMatch(/application\/problem\+json/);
@@ -296,9 +296,9 @@ describe('invoices', () => {
       const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 20000, investor });
       expect(res.status).toBe(422);
       expect(res.body.code).toBe('FUNDING_EXCEEDS_CAPACITY');
-      expect(res.body.remainingCapacity).toBe(7000);
+      expect(res.body.remainingCapacity).toBe('7000');
       const after = await request(app).get('/api/invoices/INV_0002');
-      expect(after.body.data.fundedAmount).toBe(18000);
+      expect(after.body.data.fundedAmount).toBe('18000');
       expect(after.body.data.status).toBe('open');
     });
 
@@ -307,20 +307,21 @@ describe('invoices', () => {
         .post('/api/invoices/INV_0002/fund').set(authHeader())
         .send({ amount: 20000, investor, allowPartial: true });
       expect(res.status).toBe(200);
-      expect(res.body.accepted).toBe(7000);
-      expect(res.body.rejected).toBe(13000);
-      expect(res.body.data.fundedAmount).toBe(25000);
+      expect(res.body.accepted).toBe('7000');
+      expect(res.body.rejected).toBe('13000');
+      expect(res.body.data.fundedAmount).toBe('25000');
       expect(res.body.data.status).toBe('funded');
-      expect(res.body.data.remainingCapacity).toBe(0);
+      expect(res.body.data.remainingCapacity).toBe('0');
     });
 
-    test('rejects invalid amounts (non-positive, non-finite, above face value, non-number) with 400', async () => {
-      for (const amount of [0, -1, 1e308, 25001, '100']) {
+    test('rejects invalid amounts (non-positive, non-finite, above face value, malformed) with 400', async () => {
+      // Decimal strings such as '100' are valid amounts since #1529; malformed strings are not.
+      for (const amount of [0, -1, 1e308, 25001, '25001', 'abc', true]) {
         const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount, investor });
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('INVALID_AMOUNT');
       }
-      expect(store.get('INV_0002').fundedAmount).toBe(18000);
+      expect(store.get('INV_0002').fundedAmount).toBe('18000');
     });
 
     test('an amount just above remaining capacity is rejected with 422', async () => {
@@ -339,7 +340,7 @@ describe('invoices', () => {
   test('store.fund throws when called over capacity and does not mutate', () => {
     const invoice = store.get('INV_0002');
     expect(() => store.fund(invoice, 100000, 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC')).toThrow();
-    expect(invoice.fundedAmount).toBe(18000);
+    expect(invoice.fundedAmount).toBe('18000');
     expect(invoice.status).toBe('open');
   });
 
@@ -670,10 +671,14 @@ describe('zod validation (#1562)', () => {
     const res = await request(app).get('/openapi.json');
     expect(res.status).toBe(200);
     const props = res.body.components.schemas.CreateInvoiceBody.properties;
-    expect(props.amount.maximum).toBe(1e12);
+    // Since #1529 amount is a number or a decimal string; the number branch keeps the bounds.
+    const numeric = (props.amount.anyOf || props.amount.oneOf).find((branch) => branch.type === 'number');
+    const decimal = (props.amount.anyOf || props.amount.oneOf).find((branch) => branch.type === 'string');
+    expect(numeric.maximum).toBeCloseTo(922337203685.4775807);
     // OAS 3.0: exclusiveMinimum is a boolean paired with minimum
-    expect(props.amount.exclusiveMinimum).toBe(true);
-    expect(props.amount.minimum).toBe(0);
+    expect(numeric.exclusiveMinimum).toBe(true);
+    expect(numeric.minimum).toBe(0);
+    expect(decimal.pattern).toBeDefined();
     expect(props.sme.maxLength).toBe(120);
     expect(props.debtor.maxLength).toBe(120);
   });
@@ -710,7 +715,7 @@ describe('zod validation (#1562)', () => {
     const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 10, investor: INVESTOR, extra: 'bad' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('VALIDATION_FAILED');
-    expect(store.get('INV_0002').fundedAmount).toBe(18000);
+    expect(store.get('INV_0002').fundedAmount).toBe('18000');
   });
 
   test.each(['/api/invoices', '/api/invoices/INV_0001/fund'])('POST %s with text/plain returns 415', async (url) => {
