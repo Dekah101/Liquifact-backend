@@ -307,10 +307,6 @@ describe('idempotency', () => {
       testApp.use(idempotency);
 
       let inFlight = false;
-      let resolveFirst;
-      const firstRequestComplete = new Promise((resolve) => {
-        resolveFirst = resolve;
-      });
 
       testApp.post('/test-slow', async (req, res) => {
         if (!inFlight) {
@@ -318,7 +314,6 @@ describe('idempotency', () => {
           // First request takes some time
           await new Promise((resolve) => setTimeout(resolve, 100));
           res.status(201).json({ data: { id: 'test' } });
-          resolveFirst();
         } else {
           // Second request happens while first is still processing
           res.status(201).json({ data: { id: 'test' } });
