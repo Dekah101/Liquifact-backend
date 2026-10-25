@@ -14,7 +14,8 @@ const { parseAmount } = require('../lib/money');
 // Money on the API boundary: a decimal string (preferred) or a JSON number,
 // at most 7 fractional digits, > 0 and <= MAX_INVOICE_AMOUNT (2^63-1 minor units).
 const DECIMAL_AMOUNT = /^\d+(\.\d{1,7})?$/;
-const MAX_AMOUNT_NUMBER = 922337203685.4775807;
+// Approximate upper bound for docs; the exact limit is enforced by parseAmount.
+const MAX_AMOUNT_NUMBER = Number('922337203685.4775807');
 const isParseableAmount = (value) => {
   try {
     parseAmount(value);
