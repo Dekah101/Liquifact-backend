@@ -674,7 +674,7 @@ describe('zod validation (#1562)', () => {
     // Since #1529 amount is a number or a decimal string; the number branch keeps the bounds.
     const numeric = (props.amount.anyOf || props.amount.oneOf).find((branch) => branch.type === 'number');
     const decimal = (props.amount.anyOf || props.amount.oneOf).find((branch) => branch.type === 'string');
-    expect(numeric.maximum).toBeCloseTo(922337203685.4775807);
+    expect(numeric.maximum).toBe(Number('922337203685.4775807'));
     // OAS 3.0: exclusiveMinimum is a boolean paired with minimum
     expect(numeric.exclusiveMinimum).toBe(true);
     expect(numeric.minimum).toBe(0);
