@@ -4,7 +4,6 @@ const crypto = require('crypto');
 
 const MAX_ENTRIES = parseInt(process.env.IDEMPOTENCY_MAX_ENTRIES, 10) || 10000;
 const TTL_SECONDS = parseInt(process.env.IDEMPOTENCY_TTL_SECONDS, 10) || 86400; // 24 hours
-const REQUIRED = process.env.IDEMPOTENCY_REQUIRED === 'true';
 
 /**
  * Simple LRU cache implementation for idempotency store.
@@ -50,6 +49,10 @@ class LRUCache {
     return this.get(key) !== null;
   }
 
+  delete(key) {
+    this.cache.delete(key);
+  }
+
   clear() {
     this.cache.clear();
   }
@@ -62,14 +65,30 @@ class LRUCache {
 const idempotencyStore = new LRUCache(MAX_ENTRIES);
 
 /**
- * Computes SHA256 hash of canonical JSON (sorted keys).
+ * Canonical JSON: object keys sorted recursively, so key order never changes
+ * the fingerprint.
  *
- * @param {object} body request body
+ * @param {unknown} value JSON value
+ * @returns {string} canonical JSON text
+ */
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+/**
+ * Computes SHA256 hash of the canonical JSON request body.
+ *
+ * @param {unknown} body request body (may be undefined for non-JSON requests)
  * @returns {string} hex hash
  */
 function fingerprint(body) {
-  const canonical = JSON.stringify(body, Object.keys(body).sort());
-  return crypto.createHash('sha256').update(canonical).digest('hex');
+  return crypto.createHash('sha256').update(canonicalJson(body)).digest('hex');
 }
 
 /**
@@ -97,7 +116,7 @@ function isValidKey(key) {
  */
 function scopeKey(req, key) {
   const principal = req.user?.id || req.ip;
-  return `${req.method}:${req.path}:${principal}:${key}`;
+  return `${req.method}:${req.baseUrl}${req.path}:${principal}:${key}`;
 }
 
 /**
@@ -110,8 +129,8 @@ function scopeKey(req, key) {
 function idempotency(req, res, next) {
   const idempotencyKey = req.get('Idempotency-Key');
 
-  // Check if key is required
-  if (REQUIRED && !idempotencyKey) {
+  // Check if key is required (read per request so it can be toggled at runtime)
+  if (process.env.IDEMPOTENCY_REQUIRED === 'true' && !idempotencyKey) {
     return res.status(400).json({ error: 'IDEMPOTENCY_KEY_REQUIRED' });
   }
 
@@ -169,13 +188,8 @@ function idempotency(req, res, next) {
         createdAt: new Date().toISOString(),
       }, TTL_SECONDS);
     } else {
-      // Remove in-flight entry if not caching
-      idempotencyStore.set(scopedKey, {
-        fingerprint: fp,
-        state: 'done',
-        body: null,
-        status: null,
-      }, 0); // Expire immediately
+      // Remove the in-flight entry so the client can retry
+      idempotencyStore.delete(scopedKey);
     }
 
     res.set('Idempotency-Key', idempotencyKey);

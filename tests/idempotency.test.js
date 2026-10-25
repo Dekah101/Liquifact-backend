@@ -5,6 +5,8 @@ const app = require('../src/app');
 const store = require('../src/data/store');
 const idempotency = require('../src/middleware/idempotency');
 
+const INVESTOR = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
+
 beforeEach(() => {
   store.reset();
   idempotency.resetStore();
@@ -109,7 +111,7 @@ describe('idempotency', () => {
       const first = await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       expect(first.status).toBe(200);
       expect(first.headers['idempotency-key']).toBe(key);
@@ -118,7 +120,7 @@ describe('idempotency', () => {
       const second = await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       expect(second.status).toBe(200);
       expect(second.headers['idempotency-key']).toBe(key);
@@ -138,13 +140,13 @@ describe('idempotency', () => {
       await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       // Second request with same key (should replay)
       await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       // Verify fundedAmount increased only once
       const updated = store.get('INV_0002');
@@ -157,14 +159,14 @@ describe('idempotency', () => {
       const first = await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       expect(first.status).toBe(200);
 
       const second = await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 200 });
+        .send({ amount: 200, investor: INVESTOR });
 
       expect(second.status).toBe(422);
       expect(second.body.error).toBe('IDEMPOTENCY_KEY_REUSED');
@@ -185,7 +187,7 @@ describe('idempotency', () => {
       const fundRes = await request(app)
         .post('/api/invoices/INV_0002/fund')
         .set('Idempotency-Key', key)
-        .send({ amount: 100 });
+        .send({ amount: 100, investor: INVESTOR });
 
       expect(fundRes.status).toBe(200);
       expect(fundRes.headers['idempotent-replayed']).toBeUndefined();
@@ -193,10 +195,41 @@ describe('idempotency', () => {
   });
 
   describe('required mode', () => {
-    test('rejects missing key when required', async () => {
-      // Skip this test as it requires module reloading which is fragile
-      // The feature is tested manually and works when IDEMPOTENCY_REQUIRED=true
-      expect(true).toBe(true);
+    afterEach(() => {
+      delete process.env.IDEMPOTENCY_REQUIRED;
+    });
+
+    test('rejects a missing key when IDEMPOTENCY_REQUIRED=true', async () => {
+      process.env.IDEMPOTENCY_REQUIRED = 'true';
+      const res = await request(app)
+        .post('/api/invoices')
+        .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('IDEMPOTENCY_KEY_REQUIRED');
+      expect(store.list()).toHaveLength(4);
+    });
+
+    test('rejects malformed keys', async () => {
+      for (const key of ['short', 'x'.repeat(129), 'has spaces in it']) {
+        const res = await request(app)
+          .post('/api/invoices')
+          .set('Idempotency-Key', key)
+          .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('INVALID_IDEMPOTENCY_KEY');
+      }
+    });
+
+    test('payload key order does not change the fingerprint', async () => {
+      const key = 'order-insensitive-key';
+      const first = await request(app).post('/api/invoices').set('Idempotency-Key', key)
+        .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
+      const second = await request(app).post('/api/invoices').set('Idempotency-Key', key)
+        .send({ dueDate: '2027-01-01', amount: 500, debtor: 'Buyer', sme: 'Test SME' });
+      expect(first.status).toBe(201);
+      expect(second.status).toBe(201);
+      expect(second.headers['idempotent-replayed']).toBe('true');
+      expect(second.body.data.id).toBe(first.body.data.id);
     });
   });
 
@@ -315,43 +348,40 @@ describe('idempotency', () => {
   });
 
   describe('LRU bound', () => {
-    test('evicts oldest entries when at capacity', () => {
-      // Set small max size for testing
+    test('evicts the oldest entry when at capacity', async () => {
       const originalMax = process.env.IDEMPOTENCY_MAX_ENTRIES;
       process.env.IDEMPOTENCY_MAX_ENTRIES = '3';
-
-      // Reload the middleware to pick up new config
-      delete require.cache[require.resolve('../src/middleware/idempotency')];
-      const testIdempotency = require('../src/middleware/idempotency');
-
-      testIdempotency.resetStore();
-
-      // Add 4 entries (capacity is 3)
-      for (let i = 0; i < 4; i++) {
-        const express = require('express');
-        const testApp = express();
-        testApp.use(express.json());
-        testApp.use(testIdempotency);
-
-        testApp.post('/test', (req, res) => {
-          res.status(201).json({ data: { id: i } });
-        });
-
-        request(testApp)
-          .post('/test')
-          .set('Idempotency-Key', `key-${i}`)
-          .send({ test: i });
+      let testIdempotency;
+      jest.isolateModules(() => {
+        testIdempotency = require('../src/middleware/idempotency');
+      });
+      if (originalMax === undefined) {
+        delete process.env.IDEMPOTENCY_MAX_ENTRIES;
+      } else {
+        process.env.IDEMPOTENCY_MAX_ENTRIES = originalMax;
       }
 
-      // The store should have at most 3 entries
-      // Since we can't directly inspect the cache size, we verify by testing behavior
-      // This is a basic sanity check
+      const express = require('express');
+      const testApp = express();
+      testApp.use(express.json());
+      testApp.use(testIdempotency);
+      let calls = 0;
+      testApp.post('/test', (req, res) => {
+        calls += 1;
+        res.status(201).json({ data: { n: calls } });
+      });
 
-      process.env.IDEMPOTENCY_MAX_ENTRIES = originalMax;
-
-      // Reload original middleware
-      delete require.cache[require.resolve('../src/middleware/idempotency')];
-      require('../src/middleware/idempotency');
+      for (let i = 0; i < 4; i++) {
+        await request(testApp).post('/test').set('Idempotency-Key', `lru-key-${i}`).send({ i });
+      }
+      expect(calls).toBe(4);
+      // key-3 is still cached (replayed), key-0 was evicted (handler runs again)
+      const recent = await request(testApp).post('/test').set('Idempotency-Key', 'lru-key-3').send({ i: 3 });
+      expect(recent.headers['idempotent-replayed']).toBe('true');
+      expect(calls).toBe(4);
+      const evicted = await request(testApp).post('/test').set('Idempotency-Key', 'lru-key-0').send({ i: 0 });
+      expect(evicted.headers['idempotent-replayed']).toBeUndefined();
+      expect(calls).toBe(5);
     });
   });
 
